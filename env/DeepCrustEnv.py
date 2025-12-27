@@ -1,3 +1,5 @@
+from math import ceil
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -15,187 +17,209 @@ class DeepCrustEnv(gym.Env):
         self.n_cities = 5
         self.n_trucks = 3
         self.max_capacity = 10
-        self.travel_cost = 0.1
+
+        self.truck_speed = 0.2
+
+        self.travel_cost = 0.05
         self.delivery_reward = 10
-        self.anger_penalty_factor = 0.1
-        self.refill_reward = 0.1
+        self.anger_penalty_factor = 0.2
+        self.loitering_penalty = 0.5
+        #self.refill_reward = 0.1 # maybe add later to increase training rewards
+
         self.render_mode = render_mode
 
         # --- GRAPH LAYOUT ---
-        self.G = nx.star_graph(self.n_cities)
-        self.pos = nx.spring_layout(self.G, seed=42)
-        self.node_names = {0: "Hub", 1: "Uni", 2: "Burbs", 3: "DownT", 4: "Stad", 5: "Indus"}
+        self.node_names = {
+            0: "FHNW (Hub)",
+            1: "Brugg Bhf",
+            2: "Neumarkt",
+            3: "Königsfelden",
+            4: "Vindonissa",
+            5: "Industrie"
+        }
 
-        # --- ACTION SPACE (Multi-Discrete) ---
-        # Each truck needs its own action (0-5)
-        # Result: [Action_Truck_1, Action_Truck_2, Action_Truck_3]
+        # Coordinates (X, Y) relative to FHNW
+        self.coords = np.array([
+            [0.0, 0.0],  # 0. FHNW
+            [-0.5, 0.2],  # 1. Bahnhof
+            [-0.8, 0.3],  # 2. Neumarkt
+            [-0.3, 0.8],  # 3. Königsfelden
+            [0.6, 0.4],  # 4. Vindonissa
+            [0.8, -0.6]  # 5. Industrie
+        ])
+        self.node_pos = {i: self.coords[i] for i in range(6)}
+        self.dist_matrix = np.zeros((6, 6))
+        for i in range(6):
+            for j in range(6):
+                dist = np.linalg.norm(self.coords[i] - self.coords[j])
+                self.dist_matrix[i][j] = dist
+
+
+
         self.action_space = spaces.MultiDiscrete([self.n_cities + 1] * self.n_trucks)
 
+
         # --- OBSERVATION SPACE ---
-        # [T1_Loc, T1_Load, T2_Loc, T2_Load, ... , City1_Ord, ... City5_Ord, Time]
-        # Size = (2 * n_trucks) + n_cities + 1
+        # [T1_Loc, T1_Load, T1_Timer, T2_Loc, T2_Load, T2_Timer ... , City1_Ord, ... City5_Ord, Time]
+        # Size = (3 * n_trucks) + n_cities + time
+        obs_dim = (self.n_trucks * 3) + self.n_cities + 1
+        self.observation_space = spaces.Box(low=0, high=1, shape=(obs_dim,), dtype=np.float32)
 
-        # 1. Truck Limits
-        truck_low = [0, 0] * self.n_trucks
-        truck_high = [self.n_cities, self.max_capacity] * self.n_trucks
+        self.fig, self.ax = None, None
+        self.G = nx.Graph()
+        for i in range(6): self.G.add_node(i, pos=self.coords[i])
 
-        # 2. City Limits
-        city_low = [0] * self.n_cities
-        city_high = [200] * self.n_cities
-
-        # Combine
-        low = np.array(truck_low + city_low + [0])
-        high = np.array(truck_high + city_high + [1000])
-
-        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+        self.pos = nx.spring_layout(self.G, seed=42)
 
         self.fig, self.ax = None, None
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-
-        # Init Trucks: [Loc=0, Load=0] for all trucks
-        truck_states = np.zeros(self.n_trucks * 2, dtype=np.float32)
-
-        # Init Orders
-        orders = np.zeros(self.n_cities, dtype=np.float32)
-
+        self.truck_locs = np.zeros(self.n_trucks, dtype=np.int32)
+        self.truck_loads = np.full(self.n_trucks, self.max_capacity, dtype=np.int32)
+        self.truck_timers = np.zeros(self.n_trucks, dtype=np.float32)
+        self.orders = np.zeros(self.n_cities, dtype=np.float32)
         self.time_step = 0
-        self.state = np.concatenate((truck_states, orders, [self.time_step])).astype(np.float32)
+        return self._get_obs(), {}
 
-        return self.state, {}
+    def _get_obs(self):
+        obs = []
+        for i in range(self.n_trucks):
+            obs.append(self.truck_locs[i] / self.n_cities)
+            obs.append(self.truck_loads[i] / self.max_capacity)
+            obs.append(min(self.truck_timers[i], 20.0) / 20.0)
+        for i in range(self.n_cities):
+            obs.append(min(self.orders[i], 20) / 20.0)
+        obs.append(self.time_step / 200.0)
+        return np.array(obs, dtype=np.float32)
 
     def get_demand(self, t, node_idx):
-        """Generates 'Rush Hour' demand based on sine waves."""
-        lambda_rate = 0.6  # Increased slightly for 3 trucks
+        """
+                Generates demand based on the location type in Brugg.
+                t: current time step (0-200)
+                node_idx: 1=Bahnhof, 2=Neumarkt, 3=Königsfelden, 4=Vindonissa, 5=Industrie
+                """
+        base_prob = 0.15  # Base chance (15%)
 
-        if node_idx == 0:  # Uni
-            seasonality = np.sin((t - 80) / 20) + 1.2
-        elif node_idx == 2:  # Downtown
-            seasonality = np.sin((t - 20) / 20) + 1.2
-        else:
-            seasonality = 1.0
+        # 1. BRUGG BAHNHOF (Commuters)
+        # Two spikes: Morning (t=20-50) and Evening (t=160-190)
+        if node_idx == 1:
+            if (20 < t < 50) or (160 < t < 190):
+                return 1 if np.random.rand() < 0.6 else 0  # 60% chance during rush
+            return 1 if np.random.rand() < 0.05 else 0  # Quiet otherwise
 
-        if np.random.rand() < (lambda_rate * seasonality * 0.3):
-            return 1
+        # 2. NEUMARKT (Shopping Mall)
+        # One big peak in the middle of the day (Lunch/Afternoon)
+        elif node_idx == 2:
+            seasonality = np.sin((t - 100) / 30) + 1.0  # Smooth wave centered at t=100
+            # Cap probability at ~50%
+            prob = min(0.5, base_prob * seasonality * 1.5)
+            return 1 if np.random.rand() < prob else 0
+
+        # 3. KÖNIGSFELDEN (Hospital/Residential) & 4. VINDONISSA
+        # Random, steady demand (People always eat pizza)
+        elif node_idx in [3, 4]:
+            return 1 if np.random.rand() < 0.15 else 0
+
+        # 5. INDUSTRIE (Factories)
+        # Constant, heavy demand (Workers need lunch), but drops off at night
+        elif node_idx == 5:
+            if t < 150:  # Work shift
+                return 1 if np.random.rand() < 0.25 else 0
+            else:  # Shift over
+                return 1 if np.random.rand() < 0.05 else 0
+
         return 0
-
     def step(self, actions):
         self.time_step += 1
-
-        # -- Parse State --
-        # Truck data is the first 2*N elements
-        truck_data = self.state[:self.n_trucks * 2]
-        orders = self.state[self.n_trucks * 2: -1]
-
         reward = 0
-
-        # -- PROCESS EACH TRUCK --
-        # We loop through trucks and apply their specific action
         for i in range(self.n_trucks):
-            # Extract current truck info
-            idx_loc = i * 2
-            idx_load = i * 2 + 1
+            # 1. HANDLE TRAVEL
+            if self.truck_timers[i] > 0:
+                self.truck_timers[i] -= 1
+                if self.truck_timers[i] <= 0:
+                    self.truck_timers[i] = 0
+                    if self.truck_locs[i] == 0:
+                        self.truck_loads[i] = self.max_capacity # refill when in depot
+                continue
 
-            curr_loc = int(truck_data[idx_loc])
-            curr_load = int(truck_data[idx_load])
+            # 2. HANDLE ACTIONS
+            target = actions[i]
+            curr_loc = self.truck_locs[i]
 
-            target_loc = actions[i]  # Action for this specific truck
+            if curr_loc != 0 and self.truck_loads[i] == 0:
+                reward -= self.loitering_penalty  # GO HOME!
 
-            # 1. Movement
-            if target_loc != curr_loc:
-                reward -= self.travel_cost
-                curr_loc = target_loc
+            if target != curr_loc:
+                dist = self.dist_matrix[curr_loc][target]
+                travel_time = ceil(dist / self.truck_speed)
 
-            # 2. Load/Unload
-            if curr_loc == 0:
-                # Refill
-                if curr_load < self.max_capacity:
-                    reward += self.refill_reward  # reward refilling to encourage going back home
-                curr_load = self.max_capacity
+                self.truck_timers[i] = travel_time
+                self.truck_locs[i] = target
+
+                reward -= (dist * self.travel_cost)
             else:
-                # Deliver
-                city_idx = curr_loc - 1
-                demand = orders[city_idx]
+                if curr_loc > 0:
+                    city_idx = curr_loc - 1
+                    demand = self.orders[city_idx]
+                    if demand > 0 and self.truck_loads[i] > 0:
+                        delivery = min(self.truck_loads[i], demand)
+                        self.truck_loads[i] -= delivery
+                        self.orders[city_idx] -= delivery
+                        reward += (delivery * self.delivery_reward)
 
-                # Logic: Multiple trucks might compete for demand in same step
-                # The first one in the loop takes it (simple priority)
-                delivery = min(curr_load, demand)
-                curr_load -= delivery
-                orders[city_idx] -= delivery
-                reward += (delivery * self.delivery_reward)
-
-            # Write back to local array
-            truck_data[idx_loc] = curr_loc
-            truck_data[idx_load] = curr_load
-
-        # -- DYNAMICS --
+            # 3. DYNAMICS
         for i in range(self.n_cities):
-            orders[i] += self.get_demand(self.time_step, i)
+            self.orders[i] += self.get_demand(self.time_step, i + 1)
 
-        # -- PENALTY --
-        reward -= (np.sum(orders) * self.anger_penalty_factor)
-
-        # Update Global State
-        self.state = np.concatenate((truck_data, orders, [self.time_step])).astype(np.float32)
+        reward -= (np.sum(self.orders) * self.anger_penalty_factor)
 
         terminated = self.time_step >= 200
 
         if self.render_mode == "human":
             self.render()
 
-        return self.state, reward, terminated, False, {}
+        return self._get_obs(), reward, terminated, False, {}
 
     def render(self):
         if self.fig is None:
             plt.ion()
-            self.fig, self.ax = plt.subplots(figsize=(8, 6), facecolor='#1e1e1e')
-            self.ax.set_facecolor('#1e1e1e')
-            self.ax.axis('off')
+            self.fig, self.ax = plt.subplots(figsize=(8, 8))
 
         self.ax.clear()
 
-        truck_data = self.state[:self.n_trucks * 2]
-        orders = self.state[self.n_trucks * 2: -1]
+        # Draw Nodes (No Auto-Labels)
+        nx.draw_networkx_nodes(self.G, pos=self.node_pos, ax=self.ax, node_color='#34495e', node_size=600)
+        nx.draw_networkx_edges(self.G, pos=self.node_pos, ax=self.ax, edge_color='#bdc3c7', width=1.5, alpha=0.5)
 
-        # Draw Network
-        nx.draw_networkx_edges(self.G, self.pos, ax=self.ax, edge_color='#555555', width=2)
+        # --- FIX: Manual Labels (Black, Offset upwards) ---
+        for i in range(6):
+            loc = self.coords[i]
+            # Offset Y by +0.15 so it floats above the node
+            self.ax.text(loc[0], loc[1] + 0.15, self.node_names[i],
+                         color='black', fontsize=10, fontweight='bold',
+                         ha='center', va='bottom', zorder=10)
 
-        node_colors, node_sizes = ['#3498db'], [800]
-        for qty in orders:
-            if qty < 3:
-                col = '#2ecc71'
-            elif qty < 8:
-                col = '#f1c40f'
-            else:
-                col = '#e74c3c'
-            node_colors.append(col)
-            node_sizes.append(600 + (qty * 50))
-
-        nx.draw_networkx_nodes(self.G, self.pos, ax=self.ax, node_color=node_colors, node_size=node_sizes)
-
-        labels = {0: "HUB"}
-        for i, qty in enumerate(orders):
-            labels[i + 1] = f"{self.node_names[i + 1]}\n{int(qty)}"
-        nx.draw_networkx_labels(self.G, self.pos, labels=labels, ax=self.ax, font_color='white', font_size=9,
-                                font_weight='bold')
-
-        # Draw TRUCKS (Iterate)
+        # Draw Trucks
+        colors = ['#e74c3c', '#f1c40f', '#2ecc71']
         for i in range(self.n_trucks):
-            loc = int(truck_data[i * 2])
-            load = int(truck_data[i * 2 + 1])
+            if self.truck_timers[i] > 0:
+                self.ax.text(0, -0.8 - (i * 0.1), f"Truck {i}: Transit ({int(self.truck_timers[i])}s)", color=colors[i])
+            else:
+                loc = self.coords[self.truck_locs[i]]
+                # Slight Y offset to center on node
+                self.ax.plot(loc[0], loc[1], 'o', color=colors[i], markersize=14, markeredgecolor='white', zorder=5)
+                self.ax.text(loc[0], loc[1], str(int(self.truck_loads[i])), color='white', ha='center', va='center',
+                             fontweight='bold', fontsize=8, zorder=6)
 
-            if loc in self.pos:
-                x, y = self.pos[loc]
-                # Add Jitter so trucks don't overlap perfectly
-                jitter_x = (np.random.rand() - 0.5) * 0.15
-                jitter_y = (np.random.rand() - 0.5) * 0.15
+        # Draw Demand (Red Text Below)
+        for i in range(self.n_cities):
+            loc = self.coords[i + 1]
+            if self.orders[i] > 0:
+                self.ax.text(loc[0], loc[1] - 0.15, f"Orders: {int(self.orders[i])}", color='#c0392b',
+                             fontweight='bold', ha='center')
 
-                # Different color if empty?
-                t_col = 'white' if load > 0 else '#95a5a6'
-
-                self.ax.plot(x + jitter_x, y + jitter_y, 'o', color=t_col, markeredgecolor='blue', markersize=10,
-                             markeredgewidth=2)
-
-        self.ax.set_title(f"DeepCrust Fleet - Time: {int(self.state[-1])}", color='white', fontsize=14)
-        plt.pause(0.05)
+        self.ax.set_title(f"FHNW Logistics (Brugg/Windisch) - Step {self.time_step}")
+        self.ax.set_xlim(-1, 1)
+        self.ax.set_ylim(-1, 1)
+        plt.pause(0.01)

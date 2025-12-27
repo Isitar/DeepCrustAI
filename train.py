@@ -28,8 +28,8 @@ def make_env(rank, seed=0):
 
 def train():
     # --- CONFIGURATION ---
-    num_cpu = 16  # Set this to your number of cores (e.g., 4, 8, 12)
-    total_timesteps = 500000  # We can train much more now that it's faster
+    num_cpu = 16
+    total_timesteps = 1500000
     steps_per_env = 1024
 
     run = wandb.init(
