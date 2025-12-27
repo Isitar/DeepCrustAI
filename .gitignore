@@ -267,3 +267,9 @@ fabric.properties
 !.idea/runConfigurations
 
 # End of https://www.toptal.com/developers/gitignore/api/pycharm+all
+
+
+wandb
+models
+runs
+deepcrust_fleet_v2_parallel.zip

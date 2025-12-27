@@ -9,4 +9,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",
     "numpy>=2.3.5",
+    "stable-baselines3>=2.7.1",
+    "tensorboard>=2.20.0",
+    "wandb>=0.23.1",
 ]

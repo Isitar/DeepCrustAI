@@ -1,101 +1,201 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
 
 
 class DeepCrustEnv(gym.Env):
-    def __init__(self):
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
+
+    def __init__(self, render_mode=None):
         super(DeepCrustEnv, self).__init__()
 
         # --- CONFIGURATION ---
         self.n_cities = 5
+        self.n_trucks = 3
         self.max_capacity = 10
-        self.travel_cost = 1
-        self.delivery_reward = 20
-        self.anger_penalty_factor = 0.5
+        self.travel_cost = 0.1
+        self.delivery_reward = 10
+        self.anger_penalty_factor = 0.1
+        self.refill_reward = 0.1
+        self.render_mode = render_mode
 
-        # --- ACTION SPACE ---
-        # 0 = Go to Hub
-        # 1-5 = Go to City 1-5
-        self.action_space = spaces.Discrete(self.n_cities + 1)
+        # --- GRAPH LAYOUT ---
+        self.G = nx.star_graph(self.n_cities)
+        self.pos = nx.spring_layout(self.G, seed=42)
+        self.node_names = {0: "Hub", 1: "Uni", 2: "Burbs", 3: "DownT", 4: "Stad", 5: "Indus"}
+
+        # --- ACTION SPACE (Multi-Discrete) ---
+        # Each truck needs its own action (0-5)
+        # Result: [Action_Truck_1, Action_Truck_2, Action_Truck_3]
+        self.action_space = spaces.MultiDiscrete([self.n_cities + 1] * self.n_trucks)
 
         # --- OBSERVATION SPACE ---
-        # [Truck_Location, Truck_Load, City1_Orders, ..., City5_Orders]
-        # Low/High limits for the vector
-        low = np.array([0, 0] + [0] * self.n_cities)
-        high = np.array([self.n_cities, self.max_capacity] + [100] * self.n_cities)
+        # [T1_Loc, T1_Load, T2_Loc, T2_Load, ... , City1_Ord, ... City5_Ord, Time]
+        # Size = (2 * n_trucks) + n_cities + 1
 
-        self.observation_space = spaces.Box(low=low, high=high, dtype=np.int32)
+        # 1. Truck Limits
+        truck_low = [0, 0] * self.n_trucks
+        truck_high = [self.n_cities, self.max_capacity] * self.n_trucks
 
-        self.state = None
-        self.time_step = 0
+        # 2. City Limits
+        city_low = [0] * self.n_cities
+        city_high = [200] * self.n_cities
+
+        # Combine
+        low = np.array(truck_low + city_low + [0])
+        high = np.array(truck_high + city_high + [1000])
+
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+
+        self.fig, self.ax = None, None
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        # Initial State: Truck at Hub (0), Empty Load (0), 0 Orders everywhere
-        self.state = np.zeros(2 + self.n_cities, dtype=np.int32)
+        # Init Trucks: [Loc=0, Load=0] for all trucks
+        truck_states = np.zeros(self.n_trucks * 2, dtype=np.float32)
+
+        # Init Orders
+        orders = np.zeros(self.n_cities, dtype=np.float32)
+
         self.time_step = 0
+        self.state = np.concatenate((truck_states, orders, [self.time_step])).astype(np.float32)
 
         return self.state, {}
 
-    def step(self, action):
+    def get_demand(self, t, node_idx):
+        """Generates 'Rush Hour' demand based on sine waves."""
+        lambda_rate = 0.6  # Increased slightly for 3 trucks
+
+        if node_idx == 0:  # Uni
+            seasonality = np.sin((t - 80) / 20) + 1.2
+        elif node_idx == 2:  # Downtown
+            seasonality = np.sin((t - 20) / 20) + 1.2
+        else:
+            seasonality = 1.0
+
+        if np.random.rand() < (lambda_rate * seasonality * 0.3):
+            return 1
+        return 0
+
+    def step(self, actions):
         self.time_step += 1
 
-        # Unpack State
-        truck_loc = self.state[0]
-        truck_load = self.state[1]
-        orders = self.state[2:]  # Array of 5 cities
+        # -- Parse State --
+        # Truck data is the first 2*N elements
+        truck_data = self.state[:self.n_trucks * 2]
+        orders = self.state[self.n_trucks * 2: -1]
 
         reward = 0
 
-        # --- 1. MOVEMENT & LOGIC ---
-        target_loc = action
+        # -- PROCESS EACH TRUCK --
+        # We loop through trucks and apply their specific action
+        for i in range(self.n_trucks):
+            # Extract current truck info
+            idx_loc = i * 2
+            idx_load = i * 2 + 1
 
-        # If we moved, pay fuel cost
-        if target_loc != truck_loc:
-            reward -= self.travel_cost
-            truck_loc = target_loc  # Instant teleport for Iteration 1
+            curr_loc = int(truck_data[idx_loc])
+            curr_load = int(truck_data[idx_load])
 
-        # If at Hub (0): REFILL
-        if truck_loc == 0:
-            truck_load = self.max_capacity
+            target_loc = actions[i]  # Action for this specific truck
 
-        # If at a City (1-5): DELIVER
-        elif truck_loc > 0:
-            city_idx = truck_loc - 1  # Map node 1..5 to index 0..4
-            demand = orders[city_idx]
+            # 1. Movement
+            if target_loc != curr_loc:
+                reward -= self.travel_cost
+                curr_loc = target_loc
 
-            # How much can we give?
-            delivery_amount = min(truck_load, demand)
+            # 2. Load/Unload
+            if curr_loc == 0:
+                # Refill
+                if curr_load < self.max_capacity:
+                    reward += self.refill_reward  # reward refilling to encourage going back home
+                curr_load = self.max_capacity
+            else:
+                # Deliver
+                city_idx = curr_loc - 1
+                demand = orders[city_idx]
 
-            # Update state
-            truck_load -= delivery_amount
-            orders[city_idx] -= delivery_amount
+                # Logic: Multiple trucks might compete for demand in same step
+                # The first one in the loop takes it (simple priority)
+                delivery = min(curr_load, demand)
+                curr_load -= delivery
+                orders[city_idx] -= delivery
+                reward += (delivery * self.delivery_reward)
 
-            # Get paid!
-            reward += (delivery_amount * self.delivery_reward)
+            # Write back to local array
+            truck_data[idx_loc] = curr_loc
+            truck_data[idx_load] = curr_load
 
-        # --- 2. GENERATE NEW DEMAND (Random for now) ---
-        # Every step, small chance a city gets an order
+        # -- DYNAMICS --
         for i in range(self.n_cities):
-            if np.random.rand() < 0.3:  # 30% chance per step
-                orders[i] += 1
+            orders[i] += self.get_demand(self.time_step, i)
 
-        # --- 3. CALCULATE ANGER (Penalty) ---
-        # The sum of all waiting orders hurts the score
-        total_backlog = np.sum(orders)
-        reward -= (total_backlog * self.anger_penalty_factor)
+        # -- PENALTY --
+        reward -= (np.sum(orders) * self.anger_penalty_factor)
 
-        # Update self.state
-        self.state = np.concatenate(([truck_loc, truck_load], orders)).astype(np.int32)
+        # Update Global State
+        self.state = np.concatenate((truck_data, orders, [self.time_step])).astype(np.float32)
 
-        # Check termination (End after 100 steps for this test)
-        terminated = self.time_step >= 100
-        truncated = False  # Standard Gym requirement
+        terminated = self.time_step >= 200
 
-        return self.state, reward, terminated, truncated, {}
+        if self.render_mode == "human":
+            self.render()
+
+        return self.state, reward, terminated, False, {}
 
     def render(self):
-        # Text-based render for debugging Iteration 1
-        print(f"Step {self.time_step} | Loc: {self.state[0]} | Load: {self.state[1]} | Orders: {self.state[2:]}")
+        if self.fig is None:
+            plt.ion()
+            self.fig, self.ax = plt.subplots(figsize=(8, 6), facecolor='#1e1e1e')
+            self.ax.set_facecolor('#1e1e1e')
+            self.ax.axis('off')
+
+        self.ax.clear()
+
+        truck_data = self.state[:self.n_trucks * 2]
+        orders = self.state[self.n_trucks * 2: -1]
+
+        # Draw Network
+        nx.draw_networkx_edges(self.G, self.pos, ax=self.ax, edge_color='#555555', width=2)
+
+        node_colors, node_sizes = ['#3498db'], [800]
+        for qty in orders:
+            if qty < 3:
+                col = '#2ecc71'
+            elif qty < 8:
+                col = '#f1c40f'
+            else:
+                col = '#e74c3c'
+            node_colors.append(col)
+            node_sizes.append(600 + (qty * 50))
+
+        nx.draw_networkx_nodes(self.G, self.pos, ax=self.ax, node_color=node_colors, node_size=node_sizes)
+
+        labels = {0: "HUB"}
+        for i, qty in enumerate(orders):
+            labels[i + 1] = f"{self.node_names[i + 1]}\n{int(qty)}"
+        nx.draw_networkx_labels(self.G, self.pos, labels=labels, ax=self.ax, font_color='white', font_size=9,
+                                font_weight='bold')
+
+        # Draw TRUCKS (Iterate)
+        for i in range(self.n_trucks):
+            loc = int(truck_data[i * 2])
+            load = int(truck_data[i * 2 + 1])
+
+            if loc in self.pos:
+                x, y = self.pos[loc]
+                # Add Jitter so trucks don't overlap perfectly
+                jitter_x = (np.random.rand() - 0.5) * 0.15
+                jitter_y = (np.random.rand() - 0.5) * 0.15
+
+                # Different color if empty?
+                t_col = 'white' if load > 0 else '#95a5a6'
+
+                self.ax.plot(x + jitter_x, y + jitter_y, 'o', color=t_col, markeredgecolor='blue', markersize=10,
+                             markeredgewidth=2)
+
+        self.ax.set_title(f"DeepCrust Fleet - Time: {int(self.state[-1])}", color='white', fontsize=14)
+        plt.pause(0.05)

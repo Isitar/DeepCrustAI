@@ -1,4 +1,5 @@
 from env.DeepCrustEnv import DeepCrustEnv
+import matplotlib.pyplot as plt
 
 env = DeepCrustEnv()
 obs, _ = env.reset()
@@ -15,3 +16,9 @@ for _ in range(20):
 
     if done:
         break
+
+print("Simulation finished. Close the window to exit.")
+
+
+plt.ioff()
+plt.show()
