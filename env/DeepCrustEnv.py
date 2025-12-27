@@ -80,6 +80,9 @@ class DeepCrustEnv(gym.Env):
         self.truck_timers = np.zeros(self.n_trucks, dtype=np.float32)
         self.orders = np.zeros(self.n_cities, dtype=np.float32)
         self.time_step = 0
+
+        self.truck_prev_locs = np.zeros(self.n_trucks, dtype=np.int32)
+        self.truck_max_timers = np.ones(self.n_trucks, dtype=np.float32)
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -155,6 +158,8 @@ class DeepCrustEnv(gym.Env):
                 travel_time = ceil(dist / self.truck_speed)
 
                 self.truck_timers[i] = travel_time
+                self.truck_max_timers[i] = travel_time  # Save for animation
+                self.truck_prev_locs[i] = curr_loc  # Save Start Node
                 self.truck_locs[i] = target
 
                 reward -= (dist * self.travel_cost)
@@ -204,13 +209,37 @@ class DeepCrustEnv(gym.Env):
         colors = ['#e74c3c', '#f1c40f', '#2ecc71']
         for i in range(self.n_trucks):
             if self.truck_timers[i] > 0:
-                self.ax.text(0, -0.8 - (i * 0.1), f"Truck {i}: Transit ({int(self.truck_timers[i])}s)", color=colors[i])
+                # --- INTERPOLATION LOGIC ---
+                # 1. Get Start and End coords
+                start_pos = self.coords[self.truck_prev_locs[i]]
+                end_pos = self.coords[self.truck_locs[i]]
+
+                # 2. Calculate Progress (0.0 to 1.0)
+                # If timer = max, progress = 0. If timer = 0, progress = 1.
+                progress = 1.0 - (self.truck_timers[i] / self.truck_max_timers[i])
+
+                # 3. Linear Interpolation
+                current_x = start_pos[0] + (end_pos[0] - start_pos[0]) * progress
+                current_y = start_pos[1] + (end_pos[1] - start_pos[1]) * progress
+
+                # Draw Truck 'Ghost' on the road
+                self.ax.plot(current_x, current_y, 'o', color=colors[i], markersize=12, markeredgecolor='white',
+                             alpha=0.8, zorder=20)
+                self.ax.text(current_x, current_y + 0.08, f"T{i}", color=colors[i], fontsize=8, fontweight='bold',
+                             ha='center')
+
             else:
+                # Stationary Truck
                 loc = self.coords[self.truck_locs[i]]
-                # Slight Y offset to center on node
-                self.ax.plot(loc[0], loc[1], 'o', color=colors[i], markersize=14, markeredgecolor='white', zorder=5)
-                self.ax.text(loc[0], loc[1], str(int(self.truck_loads[i])), color='white', ha='center', va='center',
-                             fontweight='bold', fontsize=8, zorder=6)
+
+                # Offset slightly so multiple trucks don't overlap perfectly
+                offset = (i * 0.03)
+
+                self.ax.plot(loc[0] + offset, loc[1], 'o', color=colors[i], markersize=16, markeredgecolor='white',
+                             zorder=20)
+                # Show Load inside the dot
+                self.ax.text(loc[0] + offset, loc[1], str(int(self.truck_loads[i])), color='white', ha='center',
+                             va='center', fontweight='bold', fontsize=9, zorder=21)
 
         # Draw Demand (Red Text Below)
         for i in range(self.n_cities):
