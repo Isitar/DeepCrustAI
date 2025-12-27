@@ -68,10 +68,9 @@ def train():
     )
 
     print("--- TRAINING COMPLETE ---")
-    model.save("deepcrust_fleet_v2_parallel")
+    model.save("deepcrust_fleet_v3_cold_pizza")
     run.finish()
 
 
 if __name__ == "__main__":
-    # IMPORTANT: On Windows/Mac, multiprocessing requires this guard block
     train()

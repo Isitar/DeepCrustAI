@@ -24,7 +24,7 @@ class DeepCrustEnv(gym.Env):
         self.delivery_reward = 10
         self.anger_penalty_factor = 0.2
         self.loitering_penalty = 0.5
-        #self.refill_reward = 0.1 # maybe add later to increase training rewards
+        self.freshness_decay = 0.5
 
         self.render_mode = render_mode
 

@@ -4,10 +4,9 @@ from env.DeepCrustEnv import DeepCrustEnv
 from stable_baselines3 import PPO
 
 # --- CONFIGURATION ---
-MODEL_PATH = "deepcrust_fleet_v2_parallel.zip"
 STEPS = 200
 SEED = 42
-CITY_NAMES = ["University", "Burbs", "Downtown", "Stadium", "Industrial"]
+CITY_NAMES = ["Brugg Bhf", "Neumarkt", "Königsfelden", "Vindonissa", "Industrie"]
 
 
 def get_orders(env):
@@ -19,7 +18,7 @@ def get_orders(env):
     return env.state[start:end].copy()
 
 
-def get_demand_curves(agent_type="none"):
+def get_demand_curves(agent_type="none", model_path=""):
     env = DeepCrustEnv()
     # CRITICAL: Same seed ensures exact same customer orders for fair comparison
     obs, _ = env.reset(seed=SEED)
@@ -27,9 +26,9 @@ def get_demand_curves(agent_type="none"):
     model = None
     if agent_type == "ai":
         try:
-            model = PPO.load(MODEL_PATH)
+            model = PPO.load(model_path)
         except:
-            print(f"Warning: Model {MODEL_PATH} not found.")
+            print(f"Warning: Model {model_path} not found.")
             return [[] for _ in range(5)]
 
     histories = [[] for _ in range(5)]
@@ -59,15 +58,13 @@ def get_demand_curves(agent_type="none"):
 print("1. Simulating 'No Delivery' (Red)...")
 data_none = get_demand_curves(agent_type="none")
 
-print("2. Simulating 'Random Agent' (Yellow)...")
-data_random = get_demand_curves(agent_type="random")
+print("2. Simulating 'AI 1' (Yellow)...")
+ai1_name="random"
+data_ai1 = get_demand_curves(agent_type="random")
 
-print("3. Simulating 'AI Agent' (Green)...")
-data_ai = get_demand_curves(agent_type="ai")
-
-if not data_ai[0]:
-    print("Error: No AI data generated.")
-    exit()
+print("3. Simulating 'AI 2' (Green)...")
+ai2_name="Deep Crust AI1"
+data_ai2 = get_demand_curves(agent_type="ai", model_path="deepcrust_fleet_v2_parallel.zip")
 
 # --- PLOTTING ---
 plt.style.use('dark_background')
@@ -80,22 +77,20 @@ for i in range(5):
 
     # Get data for this specific city
     y_none = data_none[i]
-    y_random = data_random[i]
-    y_ai = data_ai[i]
+    y_ai1 = data_ai1[i]
+    y_ai2 = data_ai2[i]
 
     # PLOT LINES
     # 1. Total Demand (Baseline)
     ax.plot(y_none, color='#e74c3c', linestyle='--', linewidth=2, label='Incoming Demand (Baseline)')
 
-    # 2. Random Agent
-    ax.plot(y_random, color='#f1c40f', linewidth=2, alpha=0.8, label='Random Agent')
+    # 2. AI 1
+    ax.plot(y_ai1, color='#f1c40f', linewidth=2, alpha=0.8, label=ai1_name)
 
     # 3. AI Agent
-    ax.plot(y_ai, color='#2ecc71', linewidth=3, label='DeepCrust AI')
+    ax.plot(y_ai2, color='#2ecc71', linewidth=3, label=ai2_name)
 
-    # Fill area to show AI improvement over Random
-    # (Optional: Fills green where AI is lower than Random)
-    ax.fill_between(range(len(y_ai)), y_random, y_ai, where=(np.array(y_ai) < np.array(y_random)),
+    ax.fill_between(range(len(y_ai2)), y_ai1, y_ai2, where=(np.array(y_ai2) < np.array(y_ai1)),
                     color='#2ecc71', alpha=0.1, interpolate=True)
 
     ax.set_title(f"{city_name}", fontsize=14, color='white', fontweight='bold')
