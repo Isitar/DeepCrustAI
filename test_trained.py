@@ -8,8 +8,7 @@ env = DeepCrustEnv(render_mode="human")
 obs, _ = env.reset()
 
 # 2. Load the Model you just trained
-# Note: We don't need the ".zip" extension in the load string, but the file must exist
-model_name = "deepcrust_fleet_v2_parallel"
+model_name = "deepcrust_pro_large"
 
 print(f"--- LOADING MODEL: {model_name} ---")
 if not os.path.exists(f"{model_name}.zip"):

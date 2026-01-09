@@ -5,8 +5,8 @@ from stable_baselines3 import PPO
 
 # --- SETTINGS ---
 steps = 200  # Length of one 'day'
-model_path_1 = "deepcrust_fleet_v2_parallel"  # Use your latest model filename
-model_path_2 = "deepcrust_fleet_v2_parallel"  # Use your latest model filename
+model_path_1 = "deepcrust_fleet_v5_visible_clock"  # Use your latest model filename
+model_path_2 = "deepcrust_fleet_v4_cold_pizza"  # Use your latest model filename
 
 
 def run_episode(agent_type, model=None):
@@ -35,21 +35,21 @@ def run_episode(agent_type, model=None):
 
 
 # 1. Run Random Agent
-print("Running Random Agent...")
-ai1_history = run_episode("Random")
-
+ai1_name = "v2"
+print(f"Running {ai1_name}...")
 # print("Running Trained AI...")
-# if str(model_path_1).endswith(".zip"): model_path = model_path_1[:-4]  # Clean path
-# model = PPO.load(model_path_1)
-# ai1_history = run_episode("AI", model)
-ai1_name = "Random"
+if str(model_path_1).endswith(".zip"): model_path = model_path_1[:-4]  # Clean path
+model = PPO.load(model_path_1)
+ai1_history = run_episode("AI", model)
+
 
 # 2. Run AI Agent
-print("Running Trained AI...")
+ai2_name = "DeepCrust V3"
+print(f"Running {ai2_name}...")
 if str(model_path_2).endswith(".zip"): model_path = model_path_2[:-4]  # Clean path
 model = PPO.load(model_path_2)
 ai2_history = run_episode("AI", model)
-ai2_name = "DeepCrust V1"
+
 
 # 3. Plot
 plt.style.use('dark_background')  # Looks cooler

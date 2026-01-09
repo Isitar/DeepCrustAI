@@ -6,8 +6,8 @@ from stable_baselines3 import PPO
 import os
 
 # --- SETTINGS ---
-MODEL_PATH = "deepcrust_fleet_v2_parallel"
-OUTPUT_FILE = "deepcrust_victory.gif"
+MODEL_PATH = "deepcrust_fleet_v4_cold_pizza"
+OUTPUT_FILE = "deepcrust_fleet_v4_cold.gif"
 STEPS = 300
 FPS = 10
 

@@ -22,9 +22,9 @@ class DeepCrustEnv(gym.Env):
 
         self.travel_cost = 0.05
         self.delivery_reward = 10
-        self.anger_penalty_factor = 0.2
+        self.anger_penalty_factor = 0.3
         self.loitering_penalty = 0.5
-        self.freshness_decay = 0.5
+        self.freshness_decay = 0.25
 
         self.render_mode = render_mode
 
@@ -60,9 +60,8 @@ class DeepCrustEnv(gym.Env):
 
 
         # --- OBSERVATION SPACE ---
-        # [T1_Loc, T1_Load, T1_Timer, T2_Loc, T2_Load, T2_Timer ... , City1_Ord, ... City5_Ord, Time]
-        # Size = (3 * n_trucks) + n_cities + time
-        obs_dim = (self.n_trucks * 3) + self.n_cities + 1
+        # [Locs, Loads, Timers, Pizza_Ages, Orders, Global_Time]
+        obs_dim = (self.n_trucks * 4) + self.n_cities + 1
         self.observation_space = spaces.Box(low=0, high=1, shape=(obs_dim,), dtype=np.float32)
 
         self.fig, self.ax = None, None
@@ -83,6 +82,7 @@ class DeepCrustEnv(gym.Env):
 
         self.truck_prev_locs = np.zeros(self.n_trucks, dtype=np.int32)
         self.truck_max_timers = np.ones(self.n_trucks, dtype=np.float32)
+        self.truck_departure_times = np.zeros(self.n_trucks, dtype=np.int32)
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -91,6 +91,12 @@ class DeepCrustEnv(gym.Env):
             obs.append(self.truck_locs[i] / self.n_cities)
             obs.append(self.truck_loads[i] / self.max_capacity)
             obs.append(min(self.truck_timers[i], 20.0) / 20.0)
+            if self.truck_loads[i] > 0:
+                age = self.time_step - self.truck_departure_times[i]
+                obs.append(min(age, 50.0) / 50.0) # Normalize assuming 50 steps is "Very Old"
+            else:
+                obs.append(0.0)  # Empty truck has no pizza age
+
         for i in range(self.n_cities):
             obs.append(min(self.orders[i], 20) / 20.0)
         obs.append(self.time_step / 200.0)
@@ -144,6 +150,7 @@ class DeepCrustEnv(gym.Env):
                     self.truck_timers[i] = 0
                     if self.truck_locs[i] == 0:
                         self.truck_loads[i] = self.max_capacity # refill when in depot
+                        self.truck_departure_times[i] = self.time_step
                 continue
 
             # 2. HANDLE ACTIONS
@@ -151,7 +158,7 @@ class DeepCrustEnv(gym.Env):
             curr_loc = self.truck_locs[i]
 
             if curr_loc != 0 and self.truck_loads[i] == 0:
-                reward -= self.loitering_penalty  # GO HOME!
+                reward -= self.loitering_penalty
 
             if target != curr_loc:
                 dist = self.dist_matrix[curr_loc][target]
@@ -171,9 +178,16 @@ class DeepCrustEnv(gym.Env):
                         delivery = min(self.truck_loads[i], demand)
                         self.truck_loads[i] -= delivery
                         self.orders[city_idx] -= delivery
-                        reward += (delivery * self.delivery_reward)
 
-            # 3. DYNAMICS
+                        trip_duration = self.time_step - self.truck_departure_times[i]
+                        freshness_penalty = trip_duration * self.freshness_decay
+                        final_reward = max(0.0, self.delivery_reward - freshness_penalty)
+                        reward += (delivery * final_reward)
+                elif curr_loc == 0:
+                    self.truck_loads[i] = self.max_capacity
+                    self.truck_departure_times[i] = self.time_step # refresh pizza if they're at hub
+
+        # 3. DYNAMICS
         for i in range(self.n_cities):
             self.orders[i] += self.get_demand(self.time_step, i + 1)
 
