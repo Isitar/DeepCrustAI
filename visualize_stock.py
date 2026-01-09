@@ -22,11 +22,10 @@ STATS_PATH = "deepcrust_pro_large_vecnormalize.pkl"
 ANGER_THRESHOLD = 5.0
 
 
-# --- CUSTOM RENDERER (Map) ---
+# --- MAP RENDERER (Unchanged) ---
 def render_map(env, ax, title):
     ax.clear()
 
-    # 1. Colors based on Anger
     node_colors = ['#2c3e50']  # Hub
     for i in range(1, 6):
         backlog = env.orders[i - 1]
@@ -37,11 +36,9 @@ def render_map(env, ax, title):
         else:
             node_colors.append('#3498db')  # Blue
 
-    # 2. Draw Graph
     nx.draw_networkx_nodes(env.G, pos=env.node_pos, ax=ax, node_color=node_colors, node_size=500)
     nx.draw_networkx_edges(env.G, pos=env.node_pos, ax=ax, edge_color='#bdc3c7', width=2.0, alpha=0.3)
 
-    # 3. Text Labels
     for i in range(6):
         loc = env.coords[i]
         ax.text(loc[0], loc[1] + 0.15, env.node_names[i], fontsize=8, fontweight='bold', ha='center', zorder=10)
@@ -50,11 +47,8 @@ def render_map(env, ax, title):
             col = 'red' if count > ANGER_THRESHOLD else 'white'
             ax.text(loc[0], loc[1] - 0.15, f"Orders: {count}", color=col, fontsize=8, ha='center', fontweight='bold')
 
-    # 4. Trucks
     for i in range(env.n_trucks):
         color = '#2ecc71' if env.truck_loads[i] > 0 else '#95a5a6'
-
-        # Interpolation for smooth movement
         if env.truck_timers[i] > 0:
             start = env.coords[env.truck_prev_locs[i]]
             end = env.coords[env.truck_locs[i]]
@@ -72,31 +66,36 @@ def render_map(env, ax, title):
     ax.axis('off')
 
 
-# --- REVENUE GRAPH RENDERER ---
-def render_chart(ax, history, color, label):
+# --- COMBINED CHART RENDERER ---
+def render_combined_chart(ax, history_v3, history_pro):
     ax.clear()
 
-    # Plot the line
-    steps = np.arange(len(history))
-    ax.plot(steps, history, color=color, linewidth=2)
+    steps = np.arange(len(history_v3))
 
-    # Fill area under curve for "Stock Market" look
-    ax.fill_between(steps, history, color=color, alpha=0.2)
+    # Plot V3 (Grey)
+    ax.plot(steps, history_v3, color='#95a5a6', linewidth=2, label=f"V3 (Blind): ${history_v3[-1]:.0f}")
+
+    # Plot Pro (Green)
+    ax.plot(steps, history_pro, color='#2ecc71', linewidth=2, label=f"Pro (Visible): ${history_pro[-1]:.0f}")
+
+    # Highlight the gap
+    ax.fill_between(steps, history_v3, history_pro, where=(np.array(history_pro) > np.array(history_v3)),
+                    color='#2ecc71', alpha=0.1, interpolate=True)
 
     # Styling
-    current_val = history[-1] if history else 0
-    ax.set_title(f"{label}: ${current_val:.1f}", fontsize=10, fontweight='bold', color=color)
+    ax.set_title("Live Revenue Comparison", fontsize=10, fontweight='bold', color='white')
     ax.grid(color='#444444', linestyle=':', linewidth=0.5)
+    ax.legend(loc='upper left', fontsize=8, facecolor='#222222', edgecolor='white')
 
-    # Keep the view moving
-    if len(history) > 50:
-        ax.set_xlim(len(history) - 50, len(history))
+    # Scrolling Window (Show last 100 steps)
+    if len(history_v3) > 100:
+        ax.set_xlim(len(history_v3) - 100, len(history_v3))
     else:
-        ax.set_xlim(0, 50)
+        ax.set_xlim(0, 100)
 
     # Dynamic Y-Axis
-    if len(history) > 0:
-        ax.set_ylim(min(history) - 10, max(history) + 10)
+    max_val = max(max(history_v3), max(history_pro)) if history_v3 else 0
+    ax.set_ylim(min(min(history_v3), min(history_pro)) - 10, max_val + 50)
 
 
 def adapt_obs_v3(obs):
@@ -104,9 +103,8 @@ def adapt_obs_v3(obs):
 
 
 def run_battle():
-    print("--- BATTLE ARENA V2 (With Revenue Charts) ---")
+    print("--- BATTLE ARENA V3 (Combined Chart) ---")
 
-    # Setup Envs
     env_v3 = DeepCrustEnv()
 
     dummy_env = DummyVecEnv([lambda: DeepCrustEnv()])
@@ -118,18 +116,15 @@ def run_battle():
         print("❌ Error loading stats.")
         return
 
-    # Load Models
     model_v3 = PPO.load(MODEL_V3_PATH)
     model_pro = PPO.load(MODEL_PRO_PATH)
 
-    # Sync Seeds
     SEED = 42
     obs_v3, _ = env_v3.reset(seed=SEED)
     real_env_pro = env_pro_wrapper.venv.envs[0]
     real_env_pro.reset(seed=SEED)
     obs_pro = env_pro_wrapper.reset()
 
-    # Track Revenue History
     revenue_v3_hist = [0]
     revenue_pro_hist = [0]
     total_rev_v3 = 0
@@ -138,42 +133,38 @@ def run_battle():
     # PLOT SETUP
     plt.style.use('dark_background')
     fig = plt.figure(figsize=(14, 10))
-    gs = fig.add_gridspec(2, 2, height_ratios=[2, 1])  # Top row taller (Maps), Bottom row shorter (Charts)
+    gs = fig.add_gridspec(2, 2, height_ratios=[2, 1])
 
     ax_map_v3 = fig.add_subplot(gs[0, 0])
     ax_map_pro = fig.add_subplot(gs[0, 1])
-    ax_chart_v3 = fig.add_subplot(gs[1, 0])
-    ax_chart_pro = fig.add_subplot(gs[1, 1])
+    # Span the chart across both columns [1, :]
+    ax_chart = fig.add_subplot(gs[1, :])
 
     plt.ion()
 
     for t in range(500):
-        # 1. ACTIONS
+        # Actions
         v3_input = adapt_obs_v3(obs_v3)
         action_v3, _ = model_v3.predict(v3_input, deterministic=True)
         action_pro, _ = model_pro.predict(obs_pro, deterministic=True)
 
-        # 2. STEPS
+        # Steps
         obs_v3, reward_v3, _, _, _ = env_v3.step(action_v3)
         obs_pro, reward_pro_vec, _, _ = env_pro_wrapper.step(action_pro)
-        reward_pro = reward_pro_vec[0]
 
-        # 3. UPDATE STATS
+        # Stats
         total_rev_v3 += reward_v3
-        total_rev_pro += reward_pro
+        total_rev_pro += reward_pro_vec[0]
         revenue_v3_hist.append(total_rev_v3)
         revenue_pro_hist.append(total_rev_pro)
 
-        # 4. RENDER
-        # Draw Maps
-        render_map(env_v3, ax_map_v3, "V3 (Blind)")
-        render_map(real_env_pro, ax_map_pro, "Pro (Visible)")
+        # Render
+        if t % 2 == 0:  # Refresh every 2 steps to go faster
+            render_map(env_v3, ax_map_v3, "V3 (Blind)")
+            render_map(real_env_pro, ax_map_pro, "Pro (Visible)")
+            render_combined_chart(ax_chart, revenue_v3_hist, revenue_pro_hist)
 
-        # Draw Charts
-        render_chart(ax_chart_v3, revenue_v3_hist, '#95a5a6', "V3 Revenue")
-        render_chart(ax_chart_pro, revenue_pro_hist, '#2ecc71', "Pro Revenue")
-
-        plt.pause(0.01)
+            plt.pause(0.01)
 
         if not plt.fignum_exists(fig.number):
             break
