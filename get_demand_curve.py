@@ -74,7 +74,7 @@ def generate_and_plot():
         ax.plot(x_axis, smoothed_probs, color=color, linewidth=3, label=city_name)
 
     # --- Styling ---
-    ax.set_title("FHNW DeepCrust: Predicted Demand Intensity (24h Cycle)",
+    ax.set_title("DeepCrust: Demand",
                  fontsize=18, fontweight='bold', color='white', pad=20)
 
     ax.set_xlabel("Time of Day (Simulation Steps 0-200)", fontsize=14, fontweight='bold')
